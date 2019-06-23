@@ -8,4 +8,6 @@ edition = "2018"
 inotify = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.5"
-
+lettre = "0.9"
+lettre_email = "0.9"
+sys-info = "0.5"

@@ -1,6 +1,19 @@
 extern crate inotify;
+extern crate lettre;
+extern crate lettre_email;
 
-use std::io;
+use inotify::{
+	EventMask,
+	WatchMask,
+	Inotify,
+};
+
+use lettre::{SmtpClient, Transport};
+use lettre::smtp::authentication::{Credentials, Mechanism};
+use lettre::smtp::extension::ClientId;
+use lettre::smtp::ConnectionReuseParameters;
+use lettre_email::Email;
+
 use std::io::SeekFrom;
 use std::io::prelude::*;
 use std::fs::File;
@@ -8,13 +21,8 @@ use std::os::linux::fs::MetadataExt;
 use std::path::Path;
 use std::error;
 use std::fmt;
-use serde::Deserialize;
 
-use inotify::{
-	EventMask,
-	WatchMask,
-	Inotify,
-};
+use serde::Deserialize;
 
 //Errors ------------------------------------------------
 
@@ -58,7 +66,56 @@ impl std::convert::From<std::io::Error> for InitError {
 
 //Handlers ------------------------------------------------
 
-fn handler(reader : &mut LogReader, mut read_buf: &[u8]) {
+fn handle_line(config : &Config, line_str: &str) {
+	println!("Line: {}", &line_str);
+	if line_str.contains("Accepted password") {
+		println!("ACCEPTED PASSWORD!!!\n!\n!\n!\n!\n");
+		for recipient in &config.recipients {
+			let email = Email::builder()
+				.to((recipient.email.to_string(), recipient.name.to_string()))
+				.from(config.sender.email.to_string())
+				.subject("Automated message: SSH Login")
+				.text(
+					"".to_owned() +
+					"The following SSH login was recorded:\n" +
+					line_str +
+					"\n" +
+					"On the following machine:\n" +
+					"Hostname: " + &sys_info::hostname().unwrap_or("UNKNOWN".to_string()) + "\n" +
+					"OS release: " + &sys_info::os_release().unwrap_or("UNKNOWN".to_string()) + "\n" +
+					"OS type: " +  &sys_info::os_type().unwrap_or("UNKNOWN".to_string()) + "\n"
+				)
+				.build()
+				.unwrap();
+
+			// Open a local connection on port 25
+			let mut mailer = SmtpClient::new_simple(&config.sender.smtp_server).unwrap()
+				// Set the name sent during EHLO/HELO, default is `localhost`
+				.hello_name(ClientId::Domain("localhost".to_string()))
+				// Add credentials for authentication
+				.credentials(Credentials::new(config.sender.email.to_string(), config.sender.password.to_string()))
+				// Enable SMTPUTF8 if the server supports it
+				.smtp_utf8(true)
+				// Configure expected authentication mechanism
+				.authentication_mechanism(Mechanism::Plain)
+				// Enable connection reuse
+				.connection_reuse(ConnectionReuseParameters::ReuseUnlimited).transport();
+			
+			// Send the email
+			let result = mailer.send(email.into());
+
+			if result.is_ok() {
+				println!("Email sent");
+			} else {
+				println!("Could not send email: {:?}", result);
+			}
+
+			assert!(result.is_ok());
+		}
+	}
+}
+
+fn handle_bytes(config : &Config, reader : &mut LogReader, mut read_buf: &[u8]) {
 	//println!("Contents: [{:?}]", &read_buf);
 	//println!("Contents: [{}]", str::from_utf8_lossy(&read_buf));
 	loop {
@@ -66,7 +123,7 @@ fn handler(reader : &mut LogReader, mut read_buf: &[u8]) {
 			Some(newline_idx) => {
 				//println!("Newline matched: {}", newline_idx);
 				reader.buf_vec.extend_from_slice(&read_buf[0..newline_idx+1]);
-				println!("Line: {}", String::from_utf8_lossy(&reader.buf_vec));
+				handle_line(config, &String::from_utf8_lossy(&reader.buf_vec));
 				reader.buf_vec.clear();
 				read_buf = &read_buf[newline_idx+1..] //handle rest of the buffer
 			},
@@ -81,15 +138,15 @@ fn handler(reader : &mut LogReader, mut read_buf: &[u8]) {
 
 //---------------------------------------------------
 
-fn read_once(subscription : &mut LogSubscription) -> Result<(), std::io::Error> {
+fn read_once(config : &Config, subscription : &mut LogSubscription) -> Result<(), std::io::Error> {
 	if let Some(ref mut f) = subscription.file_handle {
 		loop {
-			const BUF_SZ: usize = 4;
+			const BUF_SZ: usize = 4096;
 			let mut buf = [0u8; BUF_SZ];
 			let bytes_read = f.read(&mut buf)?;
 			if bytes_read > 0 {
 				println!("Bytes read: {}", bytes_read);
-				handler(&mut subscription.log_reader, &mut buf[0..bytes_read]);
+				handle_bytes(config, &mut subscription.log_reader, &mut buf[0..bytes_read]);
 			}
 			if bytes_read < BUF_SZ { //Buffer not exhausted, read everything
 				let curr_pos = f.seek(SeekFrom::Current(0))?;
@@ -118,10 +175,10 @@ fn read_once(subscription : &mut LogSubscription) -> Result<(), std::io::Error> 
 
 //---------------------------------------------------
 
-fn event_handler(inotify : &mut Inotify, subscription : &mut LogSubscription, event : &inotify::Event<&std::ffi::OsStr>) {
+fn event_handler(config : &Config, inotify : &mut Inotify, subscription : &mut LogSubscription, event : &inotify::Event<&std::ffi::OsStr>) {
 	if let Some(ref mut f) = subscription.file_handle {
 		if event.mask.contains(EventMask::MODIFY) {
-			read_once(subscription);
+			read_once(config, subscription);
 		} else if event.mask.contains(EventMask::ATTRIB) {
 			//TODO: Remove .expect() here because this error can happen during normal operation
 			let num_links = f.metadata().expect("Could not read file metadata").st_nlink();
@@ -142,7 +199,7 @@ fn event_handler(inotify : &mut Inotify, subscription : &mut LogSubscription, ev
 		if name == &subscription.file_name.as_os_str() {
 			if event.mask.contains(EventMask::CREATE) || event.mask.contains(EventMask::MOVED_TO) {
 				if let Ok(_) = init_reader(inotify, subscription, true) {
-					read_once(subscription);
+					read_once(config, subscription);
 				}
 				// If we cannot init the reader again, we do not read and ignore the error
 				// May happen if file is created / moved and then quickly deleted / unmounted
@@ -231,9 +288,63 @@ struct Recipient {
     name: String,
 }
 
-/// Attempt to load and parse the config file into our Config struct.
-/// If a file cannot be found, return a default Config.
-/// If we find a file but cannot parse it, panic
+//---------------------------------------------------
+
+fn main() {
+	let monitored_path = "/mnt/d/Misc/Projects/Rust/monboi/testfile.txt";//"/home/test/Desktop/inotifyimpl/foo.txt"
+	let config_path = "/mnt/d/Misc/Projects/Rust/monboi/monboi.conf";//"/etc/monboi/monboi.conf"
+	let mut config_file = File::open(&config_path).unwrap();
+	let mut config_toml = String::new();
+	config_file.read_to_string(&mut config_toml).unwrap();
+	
+	let config: Config = toml::from_str(&config_toml).unwrap();
+	
+	let mut inotify = Inotify::init()
+		.expect("Failed to initialize inotify");
+	
+	let mut subscription_1 = LogSubscription::new(Path::new(monitored_path)).expect("Could not create subscription!");
+	subscription_1.dir_watch = Some(inotify
+		.add_watch(
+			&subscription_1.dir_path,
+			WatchMask::CREATE | WatchMask::MOVED_TO | WatchMask::DELETE,
+		)
+		.expect("Failed to add inotify watch"));
+	
+	let _ = init_reader(&mut inotify, &mut subscription_1, false);
+
+	let mut inotify_buf = [0u8; 4096];
+	loop {
+		let events = inotify
+			.read_events_blocking(&mut inotify_buf)
+			.expect("Failed to read inotify events");
+		
+		for event in events {
+			println!("Handle event: {:?}", event);
+			event_handler(&config, &mut inotify, &mut subscription_1, &event);
+		}
+	}
+}
+
+//---------------------------------------------------
+
+//WatchMask::MODIFY
+// File was deleted or moved, reopen file handle and read entire file again
+//WatchMask::DELETE (ONLY ON DIREFTORY)
+//WatchMask::ATTRIB (on file itself - NEED TO CHECK f.metadata().expect("Could not read metadata!").st_nlink() to see if file was unlinked!!)
+//WatchMask::MOVED_FROM (on file itself)
+//WatchMask::MOVED_TO (on file itself)
+//WatchMask::MOVE_SELF (on file itself)
+//Listen to all:
+//WatchMask::ALL_EVENTS
+//Event { wd: WatchDescriptor { id: 1, fd: (Weak) }, mask: MOVED_FROM, cookie: 801, name: Some("foo.txt") }
+//Event { wd: WatchDescriptor { id: 1, fd: (Weak) }, mask: MOVED_TO, cookie: 801, name: Some("foo2.txt") }
+//Event { wd: WatchDescriptor { id: 2, fd: (Weak) }, mask: MOVE_SELF, cookie: 0, name: None }
+
+//---------------------------------------------------
+
+// Attempt to load and parse the config file into our Config struct.
+// If a file cannot be found, return a default Config.
+// If we find a file but cannot parse it, panic
 /*pub fn parse(path: String) -> Config {
     let mut config_toml = String::new();
 
@@ -279,53 +390,3 @@ struct Recipient {
     "#).unwrap();
 */
 
-//---------------------------------------------------
-
-fn main() {
-	let monitored_path = "/mnt/d/Misc/Projects/Rust/monboi/testfile.txt";//"/home/test/Desktop/inotifyimpl/foo.txt"
-	let config_path = "/mnt/d/Misc/Projects/Rust/monboi/monboi.conf";//"/etc/monboi/monboi.conf"
-	let mut config_file = File::open(&config_path).unwrap();
-	let mut config_toml = String::new();
-	config_file.read_to_string(&mut config_toml).unwrap();
-	
-	let config: Config = toml::from_str(&config_toml).unwrap();
-	
-	let mut inotify = Inotify::init()
-		.expect("Failed to initialize inotify");
-	
-	let mut subscription_1 = LogSubscription::new(Path::new(monitored_path)).expect("Could not create subscription!");
-	subscription_1.dir_watch = Some(inotify
-		.add_watch(
-			&subscription_1.dir_path,
-			WatchMask::CREATE | WatchMask::MOVED_TO | WatchMask::DELETE,
-		)
-		.expect("Failed to add inotify watch"));
-	
-	let _ = init_reader(&mut inotify, &mut subscription_1, false);
-
-	let mut inotify_buf = [0u8; 4096];
-	loop {
-		let events = inotify
-			.read_events_blocking(&mut inotify_buf)
-			.expect("Failed to read inotify events");
-		
-		for event in events {
-			println!("Handle event: {:?}", event);
-			event_handler(&mut inotify, &mut subscription_1, &event);
-		}
-	}
-}
-
-
-//WatchMask::MODIFY
-// File was deleted or moved, reopen file handle and read entire file again
-//WatchMask::DELETE (ONLY ON DIREFTORY)
-//WatchMask::ATTRIB (on file itself - NEED TO CHECK f.metadata().expect("Could not read metadata!").st_nlink() to see if file was unlinked!!)
-//WatchMask::MOVED_FROM (on file itself)
-//WatchMask::MOVED_TO (on file itself)
-//WatchMask::MOVE_SELF (on file itself)
-//Listen to all:
-//WatchMask::ALL_EVENTS
-//Event { wd: WatchDescriptor { id: 1, fd: (Weak) }, mask: MOVED_FROM, cookie: 801, name: Some("foo.txt") }
-//Event { wd: WatchDescriptor { id: 1, fd: (Weak) }, mask: MOVED_TO, cookie: 801, name: Some("foo2.txt") }
-//Event { wd: WatchDescriptor { id: 2, fd: (Weak) }, mask: MOVE_SELF, cookie: 0, name: None }
