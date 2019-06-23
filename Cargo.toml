@@ -1,0 +1,11 @@
+[package]
+name = "monboi"
+version = "0.1.0"
+authors = ["Benjamin Richner"]
+edition = "2018"
+
+[dependencies]
+inotify = "0.7"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.5"
+
