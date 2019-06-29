@@ -1,7 +1,3 @@
 /target
 **/*.rs.bk
-main.old.rs
-monboi.conf
-ssh_session.txt
-testfile.txt
-testfile2.txt
+/tmp
