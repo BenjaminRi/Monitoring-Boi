@@ -2,6 +2,10 @@ extern crate inotify;
 extern crate lettre;
 extern crate lettre_email;
 
+#[macro_use]
+extern crate log;
+extern crate simple_logger;
+
 use inotify::{
 	EventMask,
 	WatchMask,
@@ -67,9 +71,9 @@ impl std::convert::From<std::io::Error> for InitError {
 //Handlers ------------------------------------------------
 
 fn handle_line(config : &Config, line_str: &str) {
-	println!("Line: {}", &line_str);
+	debug!("Run handle_line, line contents: [{}]", &line_str.trim_end());
 	if line_str.contains("Accepted password") {
-		println!("ACCEPTED PASSWORD!!!\n!\n!\n!\n!\n");
+		info!("MATCHED LINE: Accepted password.");
 		for recipient in &config.recipients {
 			let email = Email::builder()
 				.to((recipient.email.to_string(), recipient.name.to_string()))
@@ -105,9 +109,9 @@ fn handle_line(config : &Config, line_str: &str) {
 			let result = mailer.send(email.into());
 
 			if result.is_ok() {
-				println!("Email sent");
+				info!("Email sent");
 			} else {
-				println!("Could not send email: {:?}", result);
+				error!("Could not send email: {:?}", result);
 			}
 
 			assert!(result.is_ok());
@@ -139,23 +143,24 @@ fn handle_bytes(config : &Config, reader : &mut LogReader, mut read_buf: &[u8]) 
 //---------------------------------------------------
 
 fn read_once(config : &Config, subscription : &mut LogSubscription) -> Result<(), std::io::Error> {
+	debug!("Run read_once, file: {}", &subscription.file_path.to_string_lossy());
 	if let Some(ref mut f) = subscription.file_handle {
 		loop {
 			const BUF_SZ: usize = 4096;
 			let mut buf = [0u8; BUF_SZ];
 			let bytes_read = f.read(&mut buf)?;
 			if bytes_read > 0 {
-				println!("Bytes read: {}", bytes_read);
+				debug!("Bytes read: {}", bytes_read);
 				handle_bytes(config, &mut subscription.log_reader, &mut buf[0..bytes_read]);
 			}
 			if bytes_read < BUF_SZ { //Buffer not exhausted, read everything
 				let curr_pos = f.seek(SeekFrom::Current(0))?;
-				println!("Seek pos: {}", curr_pos);
+				debug!("Seek pos: {}", curr_pos);
 				let end_pos = f.seek(SeekFrom::End(0))?;
 				// Almost always, it holds that (end_pos == curr_pos)
 				if end_pos < curr_pos {
 					// File was truncated
-					println!("File was truncated!!");
+					debug!("File was truncated!!");
 					f.seek(SeekFrom::Start(0))?;
 					continue;
 				}else if end_pos > curr_pos {
@@ -183,15 +188,15 @@ fn event_handler(config : &Config, inotify : &mut Inotify, subscription : &mut L
 			//TODO: Remove .expect() here because this error can happen during normal operation
 			let num_links = f.metadata().expect("Could not read file metadata").st_nlink();
 			if num_links == 0 {
-				println!("File was deleted!");
+				info!("File {} was deleted (attrib notify)", &subscription.file_path.to_string_lossy());
 				subscription.log_reader.buf_vec.clear(); // Reset buffer (clear old, bytes)
 				subscription.file_handle = None;
 			}else{
-				println!("Just attrib change!");
+				debug!("File {} had attrib change", &subscription.file_path.to_string_lossy());
 			}
 		} else if event.mask.contains(EventMask::MOVE_SELF) {
 			subscription.file_handle = None;
-			println!("File was moved!");
+			info!("File {} was moved (from the outside)", &subscription.file_path.to_string_lossy());
 		}
 	}
 	
@@ -205,7 +210,7 @@ fn event_handler(config : &Config, inotify : &mut Inotify, subscription : &mut L
 				// May happen if file is created / moved and then quickly deleted / unmounted
 				// We will recover when file is created / moved again
 			}else if event.mask.contains(EventMask::DELETE) {
-				println!("File was deleted (from the outside)");
+				info!("File {} was deleted (delete notify)", &subscription.file_path.to_string_lossy());
 				subscription.log_reader.buf_vec.clear(); // Reset buffer (clear old, bytes)
 				subscription.file_handle = None;
 			}
@@ -263,7 +268,7 @@ fn init_reader(inotify : &mut Inotify, subscription : &mut LogSubscription, from
 			f.seek(SeekFrom::End(0))?; // Go to end of file
 		}
 	}
-	println!("File was opened successfully!");
+	info!("File {} was opened successfully.", &subscription.file_path.to_string_lossy());
 	Ok(())
 }
 
@@ -291,8 +296,10 @@ struct Recipient {
 //---------------------------------------------------
 
 fn main() {
-	let monitored_path = "/mnt/d/Misc/Projects/Rust/monboi/testfile.txt";//"/home/test/Desktop/inotifyimpl/foo.txt"
-	let config_path = "/mnt/d/Misc/Projects/Rust/monboi/monboi.conf";//"/etc/monboi/monboi.conf"
+	simple_logger::init().unwrap();
+	
+	let monitored_path = "/mnt/d/Misc/Projects/Rust/monboi/tmp/testfile.txt";//"/home/test/Desktop/inotifyimpl/foo.txt"
+	let config_path = "/mnt/d/Misc/Projects/Rust/monboi/tmp/monboi.conf";//"/etc/monboi/monboi.conf"
 	let mut config_file = File::open(&config_path).unwrap();
 	let mut config_toml = String::new();
 	config_file.read_to_string(&mut config_toml).unwrap();
@@ -319,7 +326,7 @@ fn main() {
 			.expect("Failed to read inotify events");
 		
 		for event in events {
-			println!("Handle event: {:?}", event);
+			debug!("Handle event: {:?}", event);
 			event_handler(&config, &mut inotify, &mut subscription_1, &event);
 		}
 	}
