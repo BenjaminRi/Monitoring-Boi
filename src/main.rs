@@ -298,8 +298,10 @@ struct Recipient {
 fn main() {
 	simple_logger::init().unwrap();
 	
-	let monitored_path = "/mnt/d/Misc/Projects/Rust/monboi/tmp/testfile.txt";//"/home/test/Desktop/inotifyimpl/foo.txt"
-	let config_path = "/mnt/d/Misc/Projects/Rust/monboi/tmp/monboi.conf";//"/etc/monboi/monboi.conf"
+	//let monitored_path = "/mnt/d/Misc/Projects/Rust/monboi/tmp/testfile.txt";//"/home/test/Desktop/inotifyimpl/foo.txt"
+	let monitored_path = "/var/log/auth.log";
+	//let config_path = "/mnt/d/Misc/Projects/Rust/monboi/tmp/monboi.conf";//"/etc/monboi/monboi.conf"
+	let config_path = "/etc/monboi/monboi.conf";
 	let mut config_file = File::open(&config_path).unwrap();
 	let mut config_toml = String::new();
 	config_file.read_to_string(&mut config_toml).unwrap();
