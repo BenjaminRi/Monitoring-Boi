@@ -3,6 +3,8 @@ name = "monboi"
 version = "0.1.0"
 authors = ["Benjamin Richner"]
 edition = "2018"
+license = "MIT"
+license-file = "LICENSE"
 
 [dependencies]
 inotify = "0.7"
