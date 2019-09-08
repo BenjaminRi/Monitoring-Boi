@@ -73,3 +73,15 @@ sudo /etc/init.d/monboi status
 ```
 
 Monitoring Boi has been tested on Ubuntu running natively and on Windows in WSL. Additionally, it has been tested on a Raspberry Pi running Raspbian. However, the application should run on all commonly used Linux distributions.
+
+If you want the service to start automatically after a reboot, run the following command:
+
+```sh
+sudo update-rc.d monboi defaults
+```
+
+To disable autostart again, run:
+
+```sh
+sudo update-rc.d monboi disable
+```
